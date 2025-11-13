@@ -56,3 +56,55 @@ with the answer. The reasoning process and answer are enclosed within <think> </
 - Training Phase: Pure RL without supervised fine-tuning
 
 ---
+
+## User Interaction Templates
+
+### 2. File Upload Template
+
+**Purpose**: This template is used in the official DeepSeek web/app when users upload files. It structures the file content along with the user's question to provide better context for the model to analyze and respond to queries about uploaded documents.
+
+**Use Case**:
+- Processing user-uploaded files in web/app interface
+- Analyzing documents, code files, or any text-based content
+- Providing context-aware responses based on file content
+
+**Key Features**:
+- Clear file name and content separation using markers
+- Structured format with begin/end markers for file content
+- Combines file content with user question in single prompt
+- Works with various file types (text, code, documents, etc.)
+
+**Template**:
+```
+[file name]: {file_name}
+[file content begin]
+{file_content}
+[file content end]
+{question}
+```
+
+**Variables**:
+- `{file_name}` - Name of the uploaded file
+- `{file_content}` - Complete content of the uploaded file
+- `{question}` - User's question or instruction about the file
+
+**Example Usage**:
+```
+[file name]: example.py
+[file content begin]
+def calculate_sum(a, b):
+    return a + b
+
+print(calculate_sum(5, 3))
+[file content end]
+Explain what this code does and suggest improvements.
+```
+
+**Source**: README.md, Section 6 (Official Prompts - File Upload)
+
+**Configuration**:
+- Temperature: 0.6 (as used in official web/app)
+- No system prompt is used
+- All instructions contained within user prompt
+
+---
