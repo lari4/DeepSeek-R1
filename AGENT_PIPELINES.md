@@ -837,3 +837,605 @@ Inference:
 ```
 
 ---
+
+## Distillation Pipeline
+
+### Overview
+The distillation pipeline transfers reasoning capabilities from the large DeepSeek-R1 model (671B params) to smaller dense models (1.5B-70B params). This approach is more efficient than training small models with RL and produces better results.
+
+### Pipeline Architecture
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                    Distillation Pipeline                          │
+└───────────────────────────────────────────────────────────────────┘
+
+Step 1: Teacher Model
+┌──────────────────────────────────┐
+│      DeepSeek-R1 (Teacher)       │
+│      • 671B total params         │
+│      • 37B activated params      │
+│      • Strong reasoning (79.8% AIME) │
+│      • General capabilities      │
+└────────┬─────────────────────────┘
+         │
+         ▼
+Step 2: Generate Training Data
+┌─────────────────────────────────────────────────────────────────┐
+│  Use R1 Checkpoint from Stage 3 (Rejection Sampling)            │
+│  (Same 800k dataset as R1 Stage 3 SFT)                         │
+│                                                                  │
+│  Dataset Composition:                                           │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │ Reasoning: ~600k samples                                    ││
+│  │ ├── Math: 200k                                              ││
+│  │ ├── Code: 250k                                              ││
+│  │ ├── Science: 100k                                           ││
+│  │ └── Logic: 50k                                              ││
+│  │                                                              ││
+│  │ Non-Reasoning: ~200k samples                                ││
+│  │ ├── Writing: 70k                                            ││
+│  │ ├── Factual QA: 50k                                         ││
+│  │ ├── Self-cognition: 20k                                     ││
+│  │ ├── Translation: 30k                                        ││
+│  │ └── General: 30k                                            ││
+│  └────────────────────────────────────────────────────────────┘│
+│                                                                  │
+│  Key: These are R1-generated reasoning traces                   │
+│  - Long chain-of-thought                                        │
+│  - Verification steps                                           │
+│  - Structured format                                            │
+└────────┬────────────────────────────────────────────────────────┘
+         │
+         ▼
+Step 3: Select Base Models
+┌─────────────────────────────────────────────────────────────────┐
+│  Open-Source Dense Models                                       │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ Qwen Series:                                             │   │
+│  │ • Qwen2.5-Math-1.5B                                      │   │
+│  │ • Qwen2.5-Math-7B                                        │   │
+│  │ • Qwen2.5-14B                                            │   │
+│  │ • Qwen2.5-32B                                            │   │
+│  │                                                           │   │
+│  │ Llama Series:                                            │   │
+│  │ • Llama-3.1-8B-Base                                      │   │
+│  │ • Llama-3.3-70B-Instruct                                 │   │
+│  │   (chosen for better reasoning than 3.1)                │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  Note: Configs and tokenizers slightly modified                │
+└────────┬────────────────────────────────────────────────────────┘
+         │
+         ▼
+Step 4: Supervised Fine-Tuning (No RL)
+┌─────────────────────────────────────────────────────────────────┐
+│  For each base model:                                           │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ 1. Load base model                                       │   │
+│  │ 2. Fine-tune on 800k R1-generated samples               │   │
+│  │ 3. Train until convergence                               │   │
+│  │ 4. Evaluate on benchmarks                                │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  Training Details:                                              │
+│  • Method: Supervised fine-tuning only (no RL)                 │
+│  • Objective: Mimic R1's reasoning patterns                    │
+│  • Loss: Standard language modeling loss                       │
+│  • No additional RL even though it could improve results       │
+│    (left for community exploration)                            │
+└────────┬────────────────────────────────────────────────────────┘
+         │
+         ▼
+Step 5: Distilled Models
+┌─────────────────────────────────────────────────────────────────┐
+│  DeepSeek-R1-Distill Family                                     │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ Model               │ Base           │ AIME  │ MATH-500 │   │
+│  ├────────────────────┼────────────────┼───────┼──────────┤   │
+│  │ R1-Distill-Qwen-1.5B│ Qwen2.5-Math  │ 28.9% │  83.9%   │   │
+│  │ R1-Distill-Qwen-7B  │ Qwen2.5-Math  │ 55.5% │  92.8%   │   │
+│  │ R1-Distill-Llama-8B │ Llama-3.1     │ 50.4% │  89.1%   │   │
+│  │ R1-Distill-Qwen-14B │ Qwen2.5       │ 69.7% │  93.9%   │   │
+│  │ R1-Distill-Qwen-32B │ Qwen2.5       │ 72.6% │  94.3%   │   │
+│  │ R1-Distill-Llama-70B│ Llama-3.3     │ 70.0% │  94.5%   │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  Key Achievements:                                              │
+│  • 7B model beats GPT-4o on math tasks                         │
+│  • 14B model surpasses QwQ-32B-Preview                         │
+│  • 32B and 70B models set new records for dense models         │
+│  • 32B comparable to o1-mini on most benchmarks                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Distillation vs RL on Small Models
+
+**Experiment**: Training Qwen-32B with RL vs Distillation
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              Distillation vs RL Comparison (Qwen-32B)            │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  Approach 1: RL on Qwen-32B-Base (R1-Zero-Qwen-32B)             │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ Method:                                                     │ │
+│  │ • Large-scale RL on Qwen2.5-32B-Base                       │ │
+│  │ • Same GRPO algorithm as R1-Zero                           │ │
+│  │ • Math, code, STEM data                                    │ │
+│  │ • 10,000+ training steps                                   │ │
+│  │                                                             │ │
+│  │ Results:                                                    │ │
+│  │ • AIME 2024: 47.0% (pass@1), 60.0% (cons@64)              │ │
+│  │ • MATH-500: 91.6%                                          │ │
+│  │ • GPQA: 55.0%                                              │ │
+│  │ • LiveCodeBench: 40.2%                                     │ │
+│  │                                                             │ │
+│  │ Performance: Similar to QwQ-32B-Preview                    │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                   │
+│  Approach 2: Distillation from R1                                │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ Method:                                                     │ │
+│  │ • SFT on 800k R1-generated samples                         │ │
+│  │ • No RL stage                                              │ │
+│  │ • Much less compute than RL                                │ │
+│  │                                                             │ │
+│  │ Results:                                                    │ │
+│  │ • AIME 2024: 72.6% (pass@1), 83.3% (cons@64)              │ │
+│  │ • MATH-500: 94.3%                                          │ │
+│  │ • GPQA: 62.1%                                              │ │
+│  │ • LiveCodeBench: 57.2%                                     │ │
+│  │                                                             │ │
+│  │ Performance: Significantly better (+25% AIME, +3% MATH)    │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                   │
+│  Conclusion:                                                      │
+│  • Distillation >> RL for small models                          │
+│  • Reasoning patterns from larger models are crucial            │
+│  • Small models can't discover complex patterns via RL alone    │
+│  • Distillation is more compute-efficient                       │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow Example
+
+```
+Example: Distilling to Qwen-7B
+═══════════════════════════════════════════════════════════════
+
+Step 1: Prompt from Dataset
+────────────────────────────────────
+Question: "Solve for x: 2^x = 16"
+
+Step 2: R1 Generated Response (Teacher)
+────────────────────────────────────────────
+<think>
+To solve 2^x = 16, I need to express 16 as a power of 2.
+
+I know that:
+• 2^1 = 2
+• 2^2 = 4
+• 2^3 = 8
+• 2^4 = 16
+
+So 16 = 2^4.
+
+Therefore, 2^x = 2^4, which means x = 4.
+
+Let me verify: 2^4 = 2 × 2 × 2 × 2 = 16 ✓
+</think>
+
+**Answer**: x = 4
+
+Step 3: Training Qwen-7B (Student)
+───────────────────────────────────────
+Input to student: "Solve for x: 2^x = 16"
+Target output: [R1's complete response above]
+
+Training objective: Minimize cross-entropy loss between
+student output and teacher output
+
+Step 4: After Training
+───────────────────────
+Student (Qwen-7B) can now generate similar reasoning:
+
+Input: "Solve for x: 2^x = 16"
+Output:
+<think>
+To solve this, I'll express 16 as a power of 2.
+16 = 2 × 8 = 2 × 2 × 4 = 2 × 2 × 2 × 2 = 2^4
+So x = 4.
+</think>
+**Answer**: x = 4
+
+→ Student learned to mimic teacher's reasoning pattern!
+```
+
+### Why Distillation Works
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                   Key Insights on Distillation                   │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  1. Pattern Transfer                                             │
+│     ┌────────────────────────────────────────────────────┐      │
+│     │ Large models (671B) can discover complex           │      │
+│     │ reasoning patterns through RL:                     │      │
+│     │ • Self-verification                                │      │
+│     │ • Multiple solution approaches                     │      │
+│     │ • Error detection and correction                   │      │
+│     │                                                     │      │
+│     │ Small models (7B-32B) struggle to find these       │      │
+│     │ patterns via RL, but can learn them through        │      │
+│     │ imitation (SFT)                                    │      │
+│     └────────────────────────────────────────────────────┘      │
+│                                                                   │
+│  2. Efficiency                                                   │
+│     ┌────────────────────────────────────────────────────┐      │
+│     │ RL Training: Thousands of steps × expensive        │      │
+│     │              environment interactions              │      │
+│     │                                                     │      │
+│     │ Distillation: Standard SFT on fixed dataset       │      │
+│     │               Much faster and cheaper              │      │
+│     └────────────────────────────────────────────────────┘      │
+│                                                                   │
+│  3. Quality                                                      │
+│     ┌────────────────────────────────────────────────────┐      │
+│     │ R1's reasoning traces are high-quality:            │      │
+│     │ • Correct answers (filtered via rejection)         │      │
+│     │ • Clean formatting                                 │      │
+│     │ • No language mixing                               │      │
+│     │ • Comprehensive reasoning                          │      │
+│     │                                                     │      │
+│     │ Better than what small model RL could produce      │      │
+│     └────────────────────────────────────────────────────┘      │
+│                                                                   │
+│  4. Generalization                                               │
+│     ┌────────────────────────────────────────────────────┐      │
+│     │ 800k diverse samples cover:                        │      │
+│     │ • Multiple reasoning types                         │      │
+│     │ • Various difficulty levels                        │      │
+│     │ • Different output formats                         │      │
+│     │                                                     │      │
+│     │ Student learns general reasoning, not just         │      │
+│     │ specific problem-solving                           │      │
+│     └────────────────────────────────────────────────────┘      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Future Improvements
+
+From the paper: "Incorporating RL could substantially boost model performance."
+
+```
+Potential Enhanced Pipeline:
+────────────────────────────────────────────────
+
+Current: Base Model → Distill SFT → Distilled Model
+
+Future: Base Model → Distill SFT → RL → Better Distilled Model
+                                     ↑
+                                     │
+                                Uses reasoning
+                                patterns from
+                                distillation as
+                                starting point
+
+Expected Benefits:
+• Further performance gains
+• Better adaptation to specific tasks
+• Continued improvement beyond teacher
+```
+
+### Performance Summary
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│        DeepSeek-R1-Distill Models vs Baselines                     │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Benchmark: AIME 2024 (pass@1)                                     │
+│  ┌───────────────────────────────────────────────────────────┐    │
+│  │ GPT-4o-0513:                9.3%                           │    │
+│  │ Claude-3.5-Sonnet-1022:    16.0%                          │    │
+│  │ ───────────────────────────────────────                   │    │
+│  │ R1-Distill-Qwen-1.5B:      28.9%  ← Beats GPT-4o!        │    │
+│  │ R1-Distill-Llama-8B:       50.4%                          │    │
+│  │ R1-Distill-Qwen-7B:        55.5%  ← Beats GPT-4o by 6×!  │    │
+│  │ OpenAI-o1-mini:            63.6%                          │    │
+│  │ R1-Distill-Qwen-14B:       69.7%  ← Beats o1-mini!       │    │
+│  │ R1-Distill-Llama-70B:      70.0%                          │    │
+│  │ R1-Distill-Qwen-32B:       72.6%  ← New SOTA for dense!  │    │
+│  │ OpenAI-o1-1217:            79.2%                          │    │
+│  │ DeepSeek-R1:               79.8%                          │    │
+│  └───────────────────────────────────────────────────────────┘    │
+│                                                                     │
+│  Key Takeaway: Even 7B distilled model significantly outperforms   │
+│  much larger general-purpose models on reasoning tasks             │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration
+
+```yaml
+Teacher Model:
+  model: DeepSeek-R1 (Stage 3 checkpoint)
+  data: 800k high-quality samples
+  composition:
+    reasoning: 600k
+    non_reasoning: 200k
+
+Student Models:
+  qwen_series:
+    - Qwen2.5-Math-1.5B
+    - Qwen2.5-Math-7B
+    - Qwen2.5-14B
+    - Qwen2.5-32B
+  llama_series:
+    - Llama-3.1-8B-Base
+    - Llama-3.3-70B-Instruct
+
+Training:
+  method: Supervised Fine-Tuning only
+  no_rl: true  # Left for community to explore
+  loss: Cross-entropy (language modeling)
+  config_modifications: slight (tokenizer, configs)
+
+Evaluation:
+  temperature: 0.6
+  sampling: pass@1 and cons@64
+  benchmarks:
+    - AIME 2024
+    - MATH-500
+    - GPQA Diamond
+    - LiveCodeBench
+    - Codeforces
+```
+
+---
+
+## Inference Pipelines
+
+### Web/App Inference Pipeline
+
+```
+User Query Flow in Official DeepSeek Web/App:
+══════════════════════════════════════════════════════════════
+
+Input: User types question in web interface
+
+         │
+         ▼
+┌─────────────────────────┐
+│  Query Classification   │
+│  - Regular query?       │
+│  - File upload?         │
+│  - Web search needed?   │
+└────────┬────────────────┘
+         │
+         ├─→ Regular Query
+         │   └→ No special template, direct to model
+         │
+         ├─→ File Upload
+         │   │
+         │   ▼
+         │   ┌────────────────────────────────────────┐
+         │   │ Apply File Upload Template:            │
+         │   │ [file name]: {name}                    │
+         │   │ [file content begin]                   │
+         │   │ {content}                              │
+         │   │ [file content end]                     │
+         │   │ {user_question}                        │
+         │   └────────┬───────────────────────────────┘
+         │            │
+         │            └→ Send to model
+         │
+         └─→ Web Search
+             │
+             ▼
+             ┌─────────────────────────────────────────┐
+             │ 1. Perform web search                   │
+             │ 2. Fetch top N results                  │
+             │ 3. Format as:                           │
+             │    [webpage 1 begin]...[webpage 1 end]  │
+             │    [webpage 2 begin]...[webpage 2 end]  │
+             │ 4. Detect query language                │
+             │ 5. Apply appropriate template:          │
+             │    - Chinese: search_answer_zh_template │
+             │    - English: search_answer_en_template │
+             └────────┬────────────────────────────────┘
+                      │
+                      └→ Send to model
+
+         │ (All paths converge)
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│  DeepSeek-R1 Model Inference                            │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │ Configuration:                                      │ │
+│  │ • Temperature: 0.6                                  │ │
+│  │ • Max length: 32,768 tokens                        │ │
+│  │ • No system prompt                                  │ │
+│  │ • Enforce start with "<think>\n"                   │ │
+│  │   (for consistent reasoning)                       │ │
+│  └────────────────────────────────────────────────────┘ │
+│                                                          │
+│  Model generates:                                       │
+│  <think>                                                │
+│  [reasoning process...]                                 │
+│  </think>                                               │
+│  [summary/answer]                                       │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│  Response Post-Processing                                │
+│  • Extract summary (user sees this primarily)           │
+│  • Format markdown                                       │
+│  • Add citations (if web search)                        │
+│  • Thinking process available in expandable section     │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+    Display to User
+```
+
+### API Inference Pipeline
+
+```
+API Request Flow:
+═══════════════════════════════════════════════════════════
+
+Client Request:
+POST /v1/chat/completions
+{
+  "model": "deepseek-reasoner",
+  "messages": [
+    {"role": "user", "content": "Solve: 2x + 5 = 13"}
+  ],
+  "temperature": 0.6,
+  "max_tokens": 32768
+}
+
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│  API Gateway                                             │
+│  • Authenticate                                          │
+│  • Rate limit                                            │
+│  • Route to inference cluster                           │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│  Inference Engine                                        │
+│  • Load model shard on GPU cluster                      │
+│  • Apply temperature, top-p, etc.                       │
+│  • Generate tokens autoregressively                     │
+│  • Stop at max_tokens or EOS                            │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│  Response Formatting                                     │
+│  • Stream or complete response                          │
+│  • Include reasoning_content field (optional)           │
+│  • Standard OpenAI-compatible format                    │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+API Response:
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "model": "deepseek-reasoner",
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": "**Answer**: x = 4",
+      "reasoning_content": "<think>...</think>"
+    }
+  }],
+  "usage": {...}
+}
+```
+
+### Evaluation Pipeline
+
+```
+Benchmark Evaluation Flow:
+═══════════════════════════════════════════════════════════
+
+┌──────────────────────────┐
+│  Benchmark Dataset       │
+│  (AIME, MATH, GPQA, ...) │
+└────────┬─────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│  For each question:                                      │
+│  ┌────────────────────────────────────────────────────┐ │
+│  │ 1. Generate N responses (N = 4 to 64)             │ │
+│  │    with temperature = 0.6, top_p = 0.95           │ │
+│  │                                                     │ │
+│  │ 2. For each response:                              │ │
+│  │    • Extract answer                                │ │
+│  │    • Verify correctness                            │ │
+│  │                                                     │ │
+│  │ 3. Calculate metrics:                              │ │
+│  │    pass@1 = (1/N) * Σ(correctness_i)              │ │
+│  │    cons@64 = majority_vote(all_responses)          │ │
+│  └────────────────────────────────────────────────────┘ │
+└────────┬─────────────────────────────────────────────────┘
+         │
+         ▼
+┌──────────────────────────────────────────────────────────┐
+│  Aggregate Results                                       │
+│  • Average across all questions                         │
+│  • Report pass@1 and cons@64                            │
+│  • Compare against baselines                            │
+└──────────────────────────────────────────────────────────┘
+
+Why pass@1 with temperature > 0?
+────────────────────────────────────────────────────────────
+Greedy decoding (temp=0) causes:
+• High repetition rates
+• Significant variability across checkpoints
+• Unstable performance
+
+Sampling with temp=0.6:
+• More reliable estimates
+• Averages out randomness
+• Better represents model capability
+```
+
+---
+
+## Summary
+
+This document describes three main pipelines and inference flows for DeepSeek-R1:
+
+### Training Pipelines
+
+1. **DeepSeek-R1-Zero**: Pure RL approach
+   - Single-stage training
+   - No supervised data
+   - Demonstrates emergence of reasoning through RL
+   - Achieves 71% on AIME 2024
+
+2. **DeepSeek-R1**: Multi-stage approach
+   - Stage 1: Cold Start SFT
+   - Stage 2: Reasoning-oriented RL
+   - Stage 3: Rejection Sampling & SFT
+   - Stage 4: RL for all scenarios
+   - Achieves 79.8% on AIME 2024 (matches o1-1217)
+
+3. **Distillation**: Transfer to small models
+   - Uses R1-generated data (800k samples)
+   - SFT only, no RL
+   - Highly effective: 7B beats GPT-4o, 32B rivals o1-mini
+   - More efficient than training small models with RL
+
+### Inference Flows
+
+4. **Web/App**: User-facing interface with special templates
+5. **API**: OpenAI-compatible endpoint
+6. **Evaluation**: Benchmark testing with pass@k metrics
+
+### Key Insights
+
+- **RL alone works**: R1-Zero proves reasoning emerges from pure RL
+- **SFT+RL better**: R1's multi-stage approach improves performance and quality
+- **Distillation superior for small models**: Beats RL-training small models directly
+- **No system prompts**: All prompts are user-level instructions
+- **Temperature matters**: 0.6 prevents repetition while maintaining quality
+- **Patterns transfer**: Large model reasoning can be distilled to small models
+
+---
+
+**Document Version**: 1.0
+**Last Updated**: 2025-11-13
+**Based on**: DeepSeek-R1 Paper (arXiv:2501.12948) and Official README
